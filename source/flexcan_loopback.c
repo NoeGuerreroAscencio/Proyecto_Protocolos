@@ -45,20 +45,16 @@ flexcan_frame_t txFrame, rxFrame;
 
 void EXAMPLE_FLEXCAN_IRQHandler(void)
 {
-#if (defined(FSL_FEATURE_FLEXCAN_HAS_EXTENDED_FLAG_REGISTER)) && (FSL_FEATURE_FLEXCAN_HAS_EXTENDED_FLAG_REGISTER > 0)
-    uint64_t flag = 1U;
-#else
+
     uint32_t flag = 1U;
-#endif
+
     /* If new data arrived. */
     if (0U != FLEXCAN_GetMbStatusFlags(EXAMPLE_CAN, flag << RX_MESSAGE_BUFFER_NUM))
     {
         FLEXCAN_ClearMbStatusFlags(EXAMPLE_CAN, flag << RX_MESSAGE_BUFFER_NUM);
-#if (defined(USE_CANFD) && USE_CANFD)
-        (void)FLEXCAN_ReadFDRxMb(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, &rxFrame);
-#else
+
         (void)FLEXCAN_ReadRxMb(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, &rxFrame);
-#endif
+
         rxComplete = true;
     }
     SDK_ISR_EXIT_BARRIER;
