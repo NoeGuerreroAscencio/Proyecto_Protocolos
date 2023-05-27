@@ -684,7 +684,7 @@ static bool FLEXCAN_IsMbIntEnabled(CAN_Type *base, uint8_t mbIdx)
  *
  * param base FlexCAN peripheral base address.
  */
-static void FLEXCAN_Reset(CAN_Type *base)
+static void _FLEXCAN_Reset(CAN_Type *base)
 {
     /* The module must should be first exit from low power
      * mode, and then soft reset can be applied.

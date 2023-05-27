@@ -5,20 +5,7 @@
  *      Author: noeas
  */
 
-/*
- * Copyright (c) 2015, Freescale Semiconductor, Inc.
- * Copyright 2016-2021 NXP
- * All rights reserved.
- *
- * SPDX-License-Identifier: BSD-3-Clause
- */
-
-//#include "fsl_debug_console.h"
 #include "Can_cfg.h"
-#include "pin_mux.h"
-#include "clock_config.h"
-#include "board.h"
-
 /*******************************************************************************
  * Definitions
  ******************************************************************************/
@@ -32,150 +19,183 @@
 #define RX_MESSAGE_BUFFER_NUM      (9)
 #define TX_MESSAGE_BUFFER_NUM      (8)
 #define DLC                        (8)
-
-/* Fix MISRA_C-2012 Rule 17.7. */
-#define LOG_INFO (void)PRINTF
-/*******************************************************************************
- * Prototypes
- ******************************************************************************/
-
-/*******************************************************************************
- * Variables
- ******************************************************************************/
-volatile bool rxComplete = false;
-
+#define CAN_CS_CODE(x)                           (((uint32_t)(((uint32_t)(x)) << CAN_CS_CODE_SHIFT)) & CAN_CS_CODE_MASK)
 flexcan_frame_t txFrame, rxFrame;
+static const clock_ip_name_t s_flexcanClock[] = FLEXCAN_CLOCKS;
+#ifndef CAN_CLOCK_CHECK_NO_AFFECTS
+/* If no define such MACRO, it mean that the CAN in current device have no clock affect issue. */
+#define CAN_CLOCK_CHECK_NO_AFFECTS (true)
+volatile bool rxComplete = false;
+#endif
+void Can_Init(const Can_ConfigType *flexcanConfig) {
+	CAN_Type *base = EXAMPLE_CAN;
+	uint32_t sourceClock_Hz = EXAMPLE_CAN_CLK_FREQ;
+	/* Assertion. */
+	assert(NULL != flexcanConfig);
+	assert(
+			(flexcanConfig->maxMbNum > 0U) && (flexcanConfig->maxMbNum <= (uint8_t)FSL_FEATURE_FLEXCAN_HAS_MESSAGE_BUFFER_MAX_NUMBERn(base)));
+	assert(flexcanConfig->bitRate > 0U);
 
-/*******************************************************************************
- * Code
- ******************************************************************************/
+	uint32_t mcrTemp;
+	uint32_t ctrl1Temp;
+#if !(defined(FSL_SDK_DISABLE_DRIVER_CLOCK_CONTROL) && FSL_SDK_DISABLE_DRIVER_CLOCK_CONTROL)
+	uint32_t instance;
+#endif
 
-void EXAMPLE_FLEXCAN_IRQHandler(void)
-{
+#if !(defined(FSL_SDK_DISABLE_DRIVER_CLOCK_CONTROL) && FSL_SDK_DISABLE_DRIVER_CLOCK_CONTROL)
+	instance = CAN_GetInstance(base);
+	/* Enable FlexCAN clock. */
+	(void) CLOCK_EnableClock(s_flexcanClock[instance]);
+	/*
+	 * Check the CAN clock in this device whether affected by Other clock gate
+	 * If it affected, we'd better to change other clock source,
+	 * If user insist on using that clock source, user need open these gate at same time,
+	 * In this scene, User need to care the power consumption.
+	 */
+	assert(CAN_CLOCK_CHECK_NO_AFFECTS);
+#endif /* FSL_SDK_DISABLE_DRIVER_CLOCK_CONTROL */
 
-    uint32_t flag = 1U;
+#if defined(CAN_CTRL1_CLKSRC_MASK)
+	{
+		/* Disable FlexCAN Module. */
+		FLEXCAN_Enable(base, false);
 
-    /* If new data arrived. */
-    if (0U != FLEXCAN_GetMbStatusFlags(EXAMPLE_CAN, flag << RX_MESSAGE_BUFFER_NUM))
-    {
-        FLEXCAN_ClearMbStatusFlags(EXAMPLE_CAN, flag << RX_MESSAGE_BUFFER_NUM);
+		/* Protocol-Engine clock source selection, This bit must be set
+		 * when FlexCAN Module in Disable Mode.
+		 */
+		base->CTRL1 =
+				(kFLEXCAN_ClkSrc0 == flexcanConfig->clkSrc) ?
+						(base->CTRL1 & ~CAN_CTRL1_CLKSRC_MASK) :
+						(base->CTRL1 | CAN_CTRL1_CLKSRC_MASK);
+	}
+#endif /* CAN_CTRL1_CLKSRC_MASK */
 
-        (void)FLEXCAN_ReadRxMb(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, &rxFrame);
+	/* Enable FlexCAN Module for configuration. */
+	FLEXCAN_Enable(base, true);
 
-        rxComplete = true;
-    }
-    SDK_ISR_EXIT_BARRIER;
+	/* Reset to known status. */
+	FLEXCAN_Reset(base);
+
+	/* Save current CTRL1 value and enable to enter Freeze mode(enabled by default). */
+	ctrl1Temp = base->CTRL1;
+
+	/* Save current MCR value and enable to enter Freeze mode(enabled by default). */
+	mcrTemp = base->MCR;
+
+	/* Enable Loop Back Mode? */
+	ctrl1Temp =
+			(flexcanConfig->enableLoopBack) ?
+					(ctrl1Temp | CAN_CTRL1_LPB_MASK) :
+					(ctrl1Temp & ~CAN_CTRL1_LPB_MASK);
+
+	/* Enable Timer Sync? */
+	ctrl1Temp =
+			(flexcanConfig->enableTimerSync) ?
+					(ctrl1Temp | CAN_CTRL1_TSYN_MASK) :
+					(ctrl1Temp & ~CAN_CTRL1_TSYN_MASK);
+
+	/* Enable Listen Only Mode? */
+	ctrl1Temp =
+			(flexcanConfig->enableListenOnlyMode) ?
+					ctrl1Temp | CAN_CTRL1_LOM_MASK :
+					ctrl1Temp & ~CAN_CTRL1_LOM_MASK;
+
+#if !(defined(FSL_FEATURE_FLEXCAN_HAS_NO_SUPV_SUPPORT) && FSL_FEATURE_FLEXCAN_HAS_NO_SUPV_SUPPORT)
+	/* Enable Supervisor Mode? */
+	mcrTemp =
+			(flexcanConfig->enableSupervisorMode) ?
+					mcrTemp | CAN_MCR_SUPV_MASK : mcrTemp & ~CAN_MCR_SUPV_MASK;
+#endif
+
+	/* Set the maximum number of Message Buffers */
+	mcrTemp = (mcrTemp & ~CAN_MCR_MAXMB_MASK)
+			| CAN_MCR_MAXMB((uint32_t )flexcanConfig->maxMbNum - 1U);
+
+	/* Enable Self Wake Up Mode and configure the wake up source. */
+	mcrTemp =
+			(flexcanConfig->enableSelfWakeup) ?
+					(mcrTemp | CAN_MCR_SLFWAK_MASK) :
+					(mcrTemp & ~CAN_MCR_SLFWAK_MASK);
+	mcrTemp =
+			(kFLEXCAN_WakeupSrcFiltered == flexcanConfig->wakeupSrc) ?
+					(mcrTemp | CAN_MCR_WAKSRC_MASK) :
+					(mcrTemp & ~CAN_MCR_WAKSRC_MASK);
+
+	/* Enable Individual Rx Masking and Queue feature? */
+	mcrTemp =
+			(flexcanConfig->enableIndividMask) ?
+					(mcrTemp | CAN_MCR_IRMQ_MASK) :
+					(mcrTemp & ~CAN_MCR_IRMQ_MASK);
+
+	/* Disable Self Reception? */
+	mcrTemp =
+			(flexcanConfig->disableSelfReception) ?
+					mcrTemp | CAN_MCR_SRXDIS_MASK :
+					mcrTemp & ~CAN_MCR_SRXDIS_MASK;
+
+	/* Write back CTRL1 Configuration to register. */
+	base->CTRL1 = ctrl1Temp;
+
+	/* Write back MCR Configuration to register. */
+	base->MCR = mcrTemp;
+
+	/* Bit Rate Configuration.*/
+	FLEXCAN_SetBitRate(base, sourceClock_Hz, flexcanConfig->bitRate,
+			flexcanConfig->timingConfig);
 }
 
-/*!
- * @brief Main function
- */
-int main(void)
-{
-	Can_ConfigType flexcanConfig;
-    flexcan_rx_mb_config_t mbConfig;
-    uint32_t flag = 1U;
-
-
-    /* Initialize board hardware. */
-    BOARD_InitBootPins();
-    BOARD_InitBootClocks();
-    BOARD_InitDebugConsole();
-
-    LOG_INFO("\r\n==FlexCAN loopback functional example -- Start.==\r\n\r\n");
-
-    /* Init FlexCAN module. */
-    /*
-     * flexcanConfig.clkSrc                 = kFLEXCAN_ClkSrc0;
-     * flexcanConfig.baudRate               = 1000000U;
-     * flexcanConfig.baudRateFD             = 2000000U;
-     * flexcanConfig.maxMbNum               = 16;
-     * flexcanConfig.enableLoopBack         = false;
-     * flexcanConfig.enableSelfWakeup       = false;
-     * flexcanConfig.enableIndividMask      = false;
-     * flexcanConfig.disableSelfReception   = false;
-     * flexcanConfig.enableListenOnlyMode   = false;
-     * flexcanConfig.enableDoze             = false;
-     */
-    FLEXCAN_GetDefaultConfig(&flexcanConfig);
-
-#if defined(EXAMPLE_CAN_CLK_SOURCE)
-    flexcanConfig.clkSrc = EXAMPLE_CAN_CLK_SOURCE;
+Std_ReturnType Can_Write(Can_HwHandleType Hth, const Can_PduType *PduInfo) {
+	//Se prepara para enviar en mensaje
+	CAN_Type *base = EXAMPLE_CAN;
+	uint8_t mbIdx = TX_MESSAGE_BUFFER_NUM;
+	Std_ReturnType status;
+	/* Assertion. */
+	assert(mbIdx <= (base->MCR & CAN_MCR_MAXMB_MASK));
+#if !defined(NDEBUG)
+	assert(!FLEXCAN_IsMbOccupied(base, mbIdx));
 #endif
 
-    flexcanConfig.enableLoopBack = true;
+	/* Inactivate Message Buffer. */
+	base->MB[mbIdx].CS = CAN_CS_CODE(kFLEXCAN_TxMbInactive);
 
-#if (defined(USE_IMPROVED_TIMING_CONFIG) && USE_IMPROVED_TIMING_CONFIG)
-    flexcan_timing_config_t timing_config;
-    memset(&timing_config, 0, sizeof(flexcan_timing_config_t));
+	/* Clean Message Buffer content. */
+	base->MB[mbIdx].ID = 0x0;
+	base->MB[mbIdx].WORD0 = 0x0;
+	base->MB[mbIdx].WORD1 = 0x0;
+	/* Prepare Tx Frame for sending. */
+	if (CAN_CS_CODE(kFLEXCAN_TxMbDataOrRemote)
+			!= (base->MB[Hth].CS & CAN_CS_CODE_MASK)) {
+		/* Prepare Tx Frame for sending. */
+		txFrame.format = (uint8_t) kFLEXCAN_FrameFormatStandard;
+		txFrame.type = (uint8_t) kFLEXCAN_FrameTypeData;
+		txFrame.id = FLEXCAN_ID_STD(0x123);
+		txFrame.length = (uint8_t) DLC;
 
-    if (FLEXCAN_CalculateImprovedTimingValues(EXAMPLE_CAN, flexcanConfig.baudRate, EXAMPLE_CAN_CLK_FREQ,
-                                              &timing_config))
-    {
-        /* Update the improved timing configuration*/
-        memcpy(&(flexcanConfig.timingConfig), &timing_config, sizeof(flexcan_timing_config_t));
-    }
-    else
-    {
-        LOG_INFO("No found Improved Timing Configuration. Just used default configuration\r\n\r\n");
-    }
-#endif
+		txFrame.dataWord0 =
+				CAN_WORD0_DATA_BYTE_0(
+						0x11) | CAN_WORD0_DATA_BYTE_1(0x22) | CAN_WORD0_DATA_BYTE_2(0x33) |
+						CAN_WORD0_DATA_BYTE_3(0x44);
+		txFrame.dataWord1 =
+				CAN_WORD1_DATA_BYTE_4(
+						0x55) | CAN_WORD1_DATA_BYTE_5(0x66) | CAN_WORD1_DATA_BYTE_6(0x77) |
+						CAN_WORD1_DATA_BYTE_7(0x88);
 
+		status = FLEXCAN_TransferSendBlocking(EXAMPLE_CAN,
+				TX_MESSAGE_BUFFER_NUM, &txFrame);
 
-    FLEXCAN_Init(EXAMPLE_CAN, &flexcanConfig, EXAMPLE_CAN_CLK_FREQ);
+	} else {
+		/* Tx Message Buffer is activated, return immediately. */
+		status = kStatus_Fail;
+	}
 
-    /* Setup Rx Message Buffer. */
-    mbConfig.format = kFLEXCAN_FrameFormatStandard;
-    mbConfig.type   = kFLEXCAN_FrameTypeData;
-    mbConfig.id     = FLEXCAN_ID_STD(0x123);
+	return status;
+}
 
-    FLEXCAN_SetRxMbConfig(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, &mbConfig, true);
-
-/* Setup Tx Message Buffer. */
-
-    FLEXCAN_SetTxMbConfig(EXAMPLE_CAN, TX_MESSAGE_BUFFER_NUM, true);
-
-    /* Enable Rx Message Buffer interrupt. */
-    FLEXCAN_EnableMbInterrupts(EXAMPLE_CAN, flag << RX_MESSAGE_BUFFER_NUM);
-    (void)EnableIRQ(EXAMPLE_FLEXCAN_IRQn);
-
-    /* Prepare Tx Frame for sending. */
-    txFrame.format = (uint8_t)kFLEXCAN_FrameFormatStandard;
-    txFrame.type   = (uint8_t)kFLEXCAN_FrameTypeData;
-    txFrame.id     = FLEXCAN_ID_STD(0x123);
-    txFrame.length = (uint8_t)DLC;
-
-    txFrame.dataWord0 = CAN_WORD0_DATA_BYTE_0(0x11) | CAN_WORD0_DATA_BYTE_1(0x22) | CAN_WORD0_DATA_BYTE_2(0x33) |
-                        CAN_WORD0_DATA_BYTE_3(0x44);
-    txFrame.dataWord1 = CAN_WORD1_DATA_BYTE_4(0x55) | CAN_WORD1_DATA_BYTE_5(0x66) | CAN_WORD1_DATA_BYTE_6(0x77) |
-                        CAN_WORD1_DATA_BYTE_7(0x88);
-
-
-    LOG_INFO("Send message from MB%d to MB%d\r\n", TX_MESSAGE_BUFFER_NUM, RX_MESSAGE_BUFFER_NUM);
-
-    LOG_INFO("tx word0 = 0x%x\r\n", txFrame.dataWord0);
-    LOG_INFO("tx word1 = 0x%x\r\n", txFrame.dataWord1);
-
-/* Send data through Tx Message Buffer using polling function. */
-
-    (void)FLEXCAN_TransferSendBlocking(EXAMPLE_CAN, TX_MESSAGE_BUFFER_NUM, &txFrame);
-
-    /* Waiting for Message receive finish. */
-    while (!rxComplete)
-    {
-    }
-
-    LOG_INFO("\r\nReceived message from MB%d\r\n", RX_MESSAGE_BUFFER_NUM);
-    LOG_INFO("rx word0 = 0x%x\r\n", rxFrame.dataWord0);
-    LOG_INFO("rx word1 = 0x%x\r\n", rxFrame.dataWord1);
-
-
-    /* Stop FlexCAN Send & Receive. */
-    FLEXCAN_DisableMbInterrupts(EXAMPLE_CAN, flag << RX_MESSAGE_BUFFER_NUM);
-
-    LOG_INFO("\r\n==FlexCAN loopback functional example -- Finish.==\r\n");
-
-    while (true)
-    {
-    }
+void Can_MainFunctionRead() {
+	uint32_t flag = 1U;
+	/* Waiting for Message receive finish. */
+	while (!rxComplete) {
+	}
+	/* Stop FlexCAN Send & Receive. */
+	DisableMbInterrupts(EXAMPLE_CAN, flag << RX_MESSAGE_BUFFER_NUM);
 }
